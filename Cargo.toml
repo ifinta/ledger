@@ -1,0 +1,23 @@
+[package]
+name = "zsozso-ledger"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+zsozso-common = { path = "../zsozso-common" }
+ed25519-dalek = "2.1"
+sha2 = "0.10"
+base64 = "0.22"
+stellar-xdr = { version = "25.0.0", features = ["curr", "base64", "std"] }
+stellar-strkey = "0.0.13"
+reqwest = { version = "0.13", features = ["json", "form"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+rand = "0.9"
+getrandom = { version = "0.3", features = ["wasm_js"] }
+zeroize = { version = "1.8", features = ["derive"] }
+web-sys = { version = "0.3", features = ["Window", "console"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+gloo-timers = { version = "0.3", features = ["futures"] }
