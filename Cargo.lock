@@ -2126,6 +2126,7 @@ checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
 [[package]]
 name = "zsozso-common"
 version = "0.1.0"
+source = "git+ssh://git@github.com/ifinta/zsozso-common.git#9d1b1776459296e96bce4eacf4f8f11034d69a21"
 
 [[package]]
 name = "zsozso-ledger"
