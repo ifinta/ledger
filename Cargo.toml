@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-zsozso-common = { path = "../zsozso-common" }
+zsozso-common = { git = "ssh://git@github.com/ifinta/zsozso-common.git" }
 ed25519-dalek = "2.1"
 sha2 = "0.10"
 base64 = "0.22"
