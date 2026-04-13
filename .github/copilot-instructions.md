@@ -2,7 +2,7 @@
 
 ## Overview
 
-This is a **shared Rust library** (git submodule) providing the blockchain abstraction layer for the Iceberg Protocol ecosystem. It is included as a submodule in every Iceberg Protocol app (cyf, proof-of-zsozso, mlm, gun-connect, admin, merlin).
+This is a **shared Rust library** (Cargo git dependency) providing the blockchain abstraction layer for the Iceberg Protocol ecosystem. It is consumed as a Cargo git dependency by every Iceberg Protocol app (cyf, proof-of-zsozso, mlm, gun-connect, admin, merlin).
 
 **This is NOT a standalone app.** It is a library crate — no `main.rs`, no `Dioxus.toml`, no PWA assets.
 
@@ -20,7 +20,8 @@ Provides the `Ledger`, `Cyf`, and `SmartContract` traits and their Stellar/Sorob
 - **`sc/proof_of_zsozso_sc.rs`** — `ProofOfZsozsoSc` client: lock, unlock, get_locked, ping (mainnet)
 - **`i18n/`** — `LedgerI18n` trait + 5 language implementations
 - **`sc/i18n/`** — `ScI18n` trait + 5 language implementations
-- **`../i18n.rs`** — `Language` enum shared across the ecosystem - it isn't copied here, it is in the App src folder, which App using this library
+
+Note: The `Language` enum, `LedgerI18n`, and `ScI18n` trait definitions live in the `zsozso-common` crate. This library implements them for each language.
 
 ## Core Traits
 

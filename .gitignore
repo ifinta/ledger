@@ -1,6 +1,4 @@
 target
-deploy
-deploy-*
+Cargo.lock
 *.rlib
 *.tgz
-dist
