@@ -17,14 +17,14 @@ use super::{KeyPair, Ledger, NetworkEnvironment, NetworkInfo};
 use zsozso_common::Language;
 use super::i18n::ledger_i18n;
 
-struct StellarNetworkConfig {
-    name: &'static str,
-    horizon_url: &'static str,
-    passphrase: &'static str,
-    friendbot_url: Option<&'static str>,
+pub(crate) struct StellarNetworkConfig {
+    pub(crate) name: &'static str,
+    pub(crate) horizon_url: &'static str,
+    pub(crate) passphrase: &'static str,
+    pub(crate) friendbot_url: Option<&'static str>,
 }
 
-fn stellar_network(env: NetworkEnvironment) -> StellarNetworkConfig {
+pub(crate) fn stellar_network(env: NetworkEnvironment) -> StellarNetworkConfig {
     match env {
         NetworkEnvironment::Test => StellarNetworkConfig {
             name: "TESTNET ⚠️",
@@ -64,6 +64,14 @@ impl Ledger for StellarLedger {
             name: net.name,
             has_faucet: net.friendbot_url.is_some(),
         }
+    }
+
+    fn horizon_url(&self) -> &'static str {
+        stellar_network(self.network).horizon_url
+    }
+
+    fn network_passphrase(&self) -> &'static str {
+        stellar_network(self.network).passphrase
     }
 
     fn generate_keypair(&self) -> KeyPair {

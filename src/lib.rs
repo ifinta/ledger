@@ -2,6 +2,7 @@ mod stellar;
 pub mod i18n;
 pub mod sc;
 pub mod cyf;
+pub mod relay;
 
 pub use stellar::StellarLedger;
 
@@ -31,6 +32,12 @@ pub struct NetworkInfo {
 pub trait Ledger {
     /// Network information for the UI
     fn network_info(&self) -> NetworkInfo;
+
+    /// Horizon API base URL for this network
+    fn horizon_url(&self) -> &'static str;
+
+    /// Network passphrase used for transaction signing
+    fn network_passphrase(&self) -> &'static str;
 
     /// Generate a new key pair
     fn generate_keypair(&self) -> KeyPair;
