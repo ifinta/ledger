@@ -259,7 +259,7 @@ pub async fn fetch_account_relays(
 pub async fn discover_relays(
     exclude: &HashSet<String>,
     known_accounts: &[String],
-    on_progress: &dyn Fn(&str),
+    on_progress: &mut dyn FnMut(&str),
     should_stop: &dyn Fn() -> bool,
 ) -> (Vec<DiscoveredRelay>, Vec<String>) {
     let horizon = stellar_network(NetworkEnvironment::Test).horizon_url;
