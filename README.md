@@ -2,6 +2,8 @@
 
 A **shared Rust library** providing the blockchain abstraction layer for the [Iceberg Protocol](https://zsozso.info) ecosystem. Consumed as a Cargo git dependency by all Iceberg Protocol apps.
 
+The architecture and critical logic of this project are the results of human-led AI-assisted engineering. This unique workflow ensures industrial-grade reliability and accelerated deployment.
+
 ## Purpose
 
 Provides the `Ledger`, `Cyf`, and `SmartContract` traits and their Stellar/Soroban implementations for keypair management, transaction building, and smart contract invocation.
