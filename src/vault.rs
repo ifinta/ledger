@@ -7,6 +7,15 @@
 
 #![allow(async_fn_in_trait)]
 
+/// Fixed ZSOZSO Stellar Asset Contract (SAC) address on Mainnet.
+///
+/// The vault is ZSOZSO-only by design, so the UI never asks the user for
+/// this — it is a compile-time constant. If the asset ever needs to change,
+/// that is a breaking change requiring a new contract deployment and a new
+/// UI release.
+pub const ZSOZSO_SAC_MAINNET: &str =
+    "CB3E6DIKOKXF4VYV3ALGS5Z2JWZ43Q24XEAX4QLV2ZC5SLGNSRWNHP6F";
+
 /// Time-locked vault interface.
 ///
 /// A vault:

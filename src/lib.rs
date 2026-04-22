@@ -6,7 +6,7 @@ pub mod relay;
 pub mod vault;
 
 pub use stellar::StellarLedger;
-pub use vault::Vault;
+pub use vault::{Vault, ZSOZSO_SAC_MAINNET};
 pub use sc::StellarVault;
 
 
