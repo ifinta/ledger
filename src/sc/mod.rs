@@ -1,9 +1,9 @@
 pub mod zsozso_sc;
-pub mod proof_of_zsozso_sc;
+pub mod vault;
 pub mod i18n;
 
 pub use zsozso_sc::ZsozsoSc;
-pub use proof_of_zsozso_sc::ProofOfZsozsoSc;
+pub use vault::StellarVault;
 
 use serde::{Deserialize, Serialize};
 use ed25519_dalek::{Signer, SigningKey};
@@ -26,13 +26,13 @@ use zsozso_common::Language;
 use self::i18n::sc_i18n;
 
 /// Soroban RPC endpoint configuration
-struct SorobanRpcConfig {
+pub(crate) struct SorobanRpcConfig {
     pub rpc_url: &'static str,
     pub horizon_url: &'static str,
     pub passphrase: &'static str,
 }
 
-fn soroban_rpc(env: NetworkEnvironment) -> SorobanRpcConfig {
+pub(crate) fn soroban_rpc(env: NetworkEnvironment) -> SorobanRpcConfig {
     match env {
         NetworkEnvironment::Test => SorobanRpcConfig {
             rpc_url: "https://soroban-testnet.stellar.org",
@@ -70,38 +70,38 @@ struct RpcError {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct SimulateResult {
-    transaction_data: Option<String>,
-    min_resource_fee: Option<serde_json::Value>,
-    results: Option<Vec<SimulateEntryResult>>,
-    error: Option<String>,
+pub(crate) struct SimulateResult {
+    pub(crate) transaction_data: Option<String>,
+    pub(crate) min_resource_fee: Option<serde_json::Value>,
+    pub(crate) results: Option<Vec<SimulateEntryResult>>,
+    pub(crate) error: Option<String>,
 }
 
 #[derive(Deserialize)]
-struct SimulateEntryResult {
-    auth: Option<Vec<String>>,
-    xdr: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SendTransactionResult {
-    status: String,
-    hash: Option<String>,
-    error_result_xdr: Option<String>,
+pub(crate) struct SimulateEntryResult {
+    pub(crate) auth: Option<Vec<String>>,
+    pub(crate) xdr: Option<String>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct GetTransactionResult {
-    status: String,
-    result_xdr: Option<String>,
+pub(crate) struct SendTransactionResult {
+    pub(crate) status: String,
+    pub(crate) hash: Option<String>,
+    pub(crate) error_result_xdr: Option<String>,
 }
 
 #[derive(Deserialize)]
-struct GetAccountResult {
-    id: String,
-    sequence: String,
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GetTransactionResult {
+    pub(crate) status: String,
+    pub(crate) result_xdr: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct GetAccountResult {
+    pub(crate) id: String,
+    pub(crate) sequence: String,
 }
 
 /// Abstract interface for any Soroban smart contract.
@@ -255,7 +255,7 @@ pub trait SmartContract {
 // ── Private helpers ────────────────────────────────────────────────────────
 
 /// Parse a contract ID from either hex (64 chars) or C... strkey.
-fn parse_contract_id(id: &str) -> Result<[u8; 32], String> {
+pub(crate) fn parse_contract_id(id: &str) -> Result<[u8; 32], String> {
     // Try C... strkey first
     if let Ok(Strkey::Contract(stellar_strkey::Contract(bytes))) = Strkey::from_string(id) {
         return Ok(bytes);
@@ -278,6 +278,19 @@ fn build_invoke_tx(
     seq_num: i64,
     invoke_args: InvokeContractArgs,
 ) -> Result<Transaction, String> {
+    build_host_fn_tx(
+        source_pub,
+        seq_num,
+        HostFunction::InvokeContract(invoke_args),
+    )
+}
+
+/// Build an unsigned Soroban tx carrying any host function (invoke / upload / create).
+pub(crate) fn build_host_fn_tx(
+    source_pub: &[u8; 32],
+    seq_num: i64,
+    host_function: HostFunction,
+) -> Result<Transaction, String> {
     let now = (js_sys::Date::now() / 1000.0) as u64;
 
     Ok(Transaction {
@@ -292,7 +305,7 @@ fn build_invoke_tx(
         operations: VecM::try_from(vec![Operation {
             source_account: None,
             body: OperationBody::InvokeHostFunction(InvokeHostFunctionOp {
-                host_function: HostFunction::InvokeContract(invoke_args),
+                host_function,
                 auth: VecM::default(),
             }),
         }])
@@ -302,7 +315,7 @@ fn build_invoke_tx(
 }
 
 /// Attach simulation results (resources, auth, fee) to the transaction.
-fn attach_simulation(
+pub(crate) fn attach_simulation(
     mut tx: Transaction,
     soroban_data: SorobanTransactionData,
     resource_fee: i64,
@@ -334,7 +347,7 @@ fn attach_simulation(
 }
 
 /// Sign a transaction, producing a TransactionEnvelope.
-fn sign_transaction(
+pub(crate) fn sign_transaction(
     tx: &Transaction,
     signing_key: &SigningKey,
     pub_bytes: &[u8; 32],
@@ -366,7 +379,7 @@ fn sign_transaction(
 }
 
 /// Extract `SorobanAuthorizationEntry` items from simulation results.
-fn extract_auth_entries(
+pub(crate) fn extract_auth_entries(
     sim: &SimulateResult,
 ) -> Result<Vec<SorobanAuthorizationEntry>, String> {
     let mut entries = Vec::new();
@@ -452,7 +465,7 @@ async fn rpc_call(
 
 /// Fetch account sequence number via the Horizon REST API
 /// (Soroban RPC does not expose a `getAccount` method).
-async fn fetch_sequence(
+pub(crate) async fn fetch_sequence(
     rpc: &SorobanRpcConfig,
     public_key: &str,
     i18n: &dyn ScI18n,
@@ -487,7 +500,7 @@ async fn fetch_sequence(
         .map_err(|e| i18n.invalid_response(&e.to_string()))
 }
 
-async fn simulate_transaction(
+pub(crate) async fn simulate_transaction(
     rpc: &SorobanRpcConfig,
     tx_xdr_base64: &str,
     i18n: &dyn ScI18n,
@@ -499,7 +512,7 @@ async fn simulate_transaction(
         .map_err(|e| i18n.invalid_response(&e.to_string()))
 }
 
-async fn send_transaction(
+pub(crate) async fn send_transaction(
     rpc: &SorobanRpcConfig,
     tx_xdr_base64: &str,
     i18n: &dyn ScI18n,
@@ -523,8 +536,7 @@ async fn get_transaction(
         .map_err(|e| i18n.invalid_response(&e.to_string()))
 }
 
-/// Poll `getTransaction` until the tx settles (success / failure / timeout).
-async fn poll_transaction(
+pub(crate) async fn poll_transaction(
     rpc: &SorobanRpcConfig,
     hash: &str,
     i18n: &dyn ScI18n,

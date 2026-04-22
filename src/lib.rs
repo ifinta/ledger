@@ -3,8 +3,11 @@ pub mod i18n;
 pub mod sc;
 pub mod cyf;
 pub mod relay;
+pub mod vault;
 
 pub use stellar::StellarLedger;
+pub use vault::Vault;
+pub use sc::StellarVault;
 
 
 /// Key pair: public address (G...) and secret key (S...)
