@@ -34,6 +34,31 @@ use crate::vault::Vault;
 use crate::NetworkEnvironment;
 use zsozso_common::Language;
 
+/// Local tracing helper — routed through the same `[Vault]`-tagged
+/// `console.log` stream the UI's log_bridge already captures into the
+/// IndexedDB ring buffer. Heavy instrumentation lives here to diagnose
+/// `StellarVault::init` (the smart-contract upload + deploy flow).
+fn vlog(msg: &str) {
+    web_sys::console::log_1(&msg.into());
+}
+
+fn host_fn_kind(host_fn: &HostFunction) -> &'static str {
+    match host_fn {
+        HostFunction::InvokeContract(_) => "InvokeContract",
+        HostFunction::CreateContract(_) => "CreateContract",
+        HostFunction::CreateContractV2(_) => "CreateContractV2",
+        HostFunction::UploadContractWasm(_) => "UploadContractWasm",
+    }
+}
+
+fn hex32(bytes: &[u8; 32]) -> String {
+    let mut s = String::with_capacity(64);
+    for b in bytes {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
+}
+
 // ── Construction ──────────────────────────────────────────────────────────
 
 /// Stellar (Soroban) implementation of [`Vault`].
@@ -81,25 +106,50 @@ impl Vault for StellarVault {
         secret_key: &str,
         token_id: &str,
     ) -> Result<String, String> {
+        vlog(&format!(
+            "[Vault init] BEGIN network={:?} wasm_len={} token_id={}",
+            self.network, self.wasm_code.len(), token_id
+        ));
         let (signing_key, pub_bytes) = decode_secret(secret_key)?;
         let owner_strkey = pubkey_to_strkey(&pub_bytes);
+        vlog(&format!("[Vault init] owner_strkey={}", owner_strkey));
+
+        let wasm_hash = self.wasm_hash();
+        vlog(&format!("[Vault init] wasm_hash=sha256:{}", hex32(&wasm_hash)));
 
         // 1. Upload WASM (idempotent on Soroban — re-uploads same hash are no-ops).
+        vlog("[Vault init] phase 1/3: UploadContractWasm — building HostFunction");
         let upload_fn = HostFunction::UploadContractWasm(
             BytesM::try_from(self.wasm_code.clone())
-                .map_err(|e| format!("WASM too large: {e}"))?,
+                .map_err(|e| {
+                    vlog(&format!("[Vault init] phase 1 FAIL (WASM too large): {}", e));
+                    format!("WASM too large: {e}")
+                })?,
         );
-        submit_host_function(
+        vlog("[Vault init] phase 1/3: submitting UploadContractWasm tx …");
+        match submit_host_function(
             &self.rpc(),
             self.language,
             &signing_key,
             &pub_bytes,
             upload_fn,
         )
-        .await?;
+        .await
+        {
+            Ok(hash) => vlog(&format!(
+                "[Vault init] phase 1/3 OK — upload tx hash={}",
+                hash
+            )),
+            Err(e) => {
+                vlog(&format!("[Vault init] phase 1/3 FAIL: {}", e));
+                return Err(e);
+            }
+        }
 
         // 2. Compute the future contract ID locally from (network_id, preimage).
+        vlog("[Vault init] phase 2/3: deriving future contract id …");
         let salt = random_salt();
+        vlog(&format!("[Vault init] phase 2/3: salt={}", hex32(&salt)));
         let owner_address = ScAddress::Account(AccountId(
             PublicKey::PublicKeyTypeEd25519(Uint256(pub_bytes)),
         ));
@@ -107,39 +157,72 @@ impl Vault for StellarVault {
             address: owner_address.clone(),
             salt: Uint256(salt),
         });
-        let contract_id = derive_contract_id(self.rpc().passphrase, &preimage)?;
+        let contract_id = derive_contract_id(self.rpc().passphrase, &preimage)
+            .map_err(|e| {
+                vlog(&format!("[Vault init] phase 2/3 FAIL (derive_contract_id): {}", e));
+                e
+            })?;
         let contract_strkey =
             Strkey::Contract(StrContract(contract_id)).to_string();
+        vlog(&format!(
+            "[Vault init] phase 2/3 OK — future contract_id={}",
+            contract_strkey
+        ));
 
         // 3. Build constructor args: (owner: String, token: String).
+        vlog("[Vault init] phase 3/3: building constructor args (owner, token) …");
         let owner_scval = ScVal::String(
             StringM::try_from(owner_strkey.clone())
-                .map_err(|e| format!("owner strkey: {e}"))?
+                .map_err(|e| {
+                    vlog(&format!("[Vault init] phase 3 owner strkey err: {}", e));
+                    format!("owner strkey: {e}")
+                })?
                 .into(),
         );
         let token_scval = ScVal::String(
             StringM::try_from(token_id.to_string())
-                .map_err(|e| format!("token strkey: {e}"))?
+                .map_err(|e| {
+                    vlog(&format!("[Vault init] phase 3 token strkey err: {}", e));
+                    format!("token strkey: {e}")
+                })?
                 .into(),
         );
         let constructor_args = VecM::try_from(vec![owner_scval, token_scval])
-            .map_err(|e| format!("constructor args: {e}"))?;
+            .map_err(|e| {
+                vlog(&format!("[Vault init] phase 3 constructor args err: {}", e));
+                format!("constructor args: {e}")
+            })?;
 
         // 4. Deploy.
+        vlog("[Vault init] phase 3/3: submitting CreateContractV2 tx …");
         let create_fn = HostFunction::CreateContractV2(CreateContractArgsV2 {
             contract_id_preimage: preimage,
             executable: ContractExecutable::Wasm(Hash(self.wasm_hash())),
             constructor_args,
         });
-        submit_host_function(
+        match submit_host_function(
             &self.rpc(),
             self.language,
             &signing_key,
             &pub_bytes,
             create_fn,
         )
-        .await?;
+        .await
+        {
+            Ok(hash) => vlog(&format!(
+                "[Vault init] phase 3/3 OK — create tx hash={}",
+                hash
+            )),
+            Err(e) => {
+                vlog(&format!("[Vault init] phase 3/3 FAIL: {}", e));
+                return Err(e);
+            }
+        }
 
+        vlog(&format!(
+            "[Vault init] END ok contract_strkey={}",
+            contract_strkey
+        ));
         Ok(contract_strkey)
     }
 
@@ -219,8 +302,21 @@ impl StellarVault {
         function_name: &str,
         args: Vec<ScVal>,
     ) -> Result<String, String> {
+        vlog(&format!(
+            "[Vault invoke_tx] BEGIN fn={} vault_id={} network={:?} args_count={}",
+            function_name,
+            vault_id,
+            self.network,
+            args.len()
+        ));
         let (signing_key, pub_bytes) = decode_secret(secret_key)?;
-        let contract_bytes = parse_contract_id(vault_id)?;
+        let contract_bytes = parse_contract_id(vault_id).map_err(|e| {
+            vlog(&format!(
+                "[Vault invoke_tx] fn={} parse_contract_id FAIL: {}",
+                function_name, e
+            ));
+            e
+        })?;
         let host_fn = HostFunction::InvokeContract(InvokeContractArgs {
             contract_address: ScAddress::Contract(ContractId(Hash(contract_bytes))),
             function_name: ScSymbol(
@@ -229,14 +325,25 @@ impl StellarVault {
             ),
             args: VecM::try_from(args).map_err(|e| format!("args: {e}"))?,
         });
-        submit_host_function(
+        let result = submit_host_function(
             &self.rpc(),
             self.language,
             &signing_key,
             &pub_bytes,
             host_fn,
         )
-        .await
+        .await;
+        match &result {
+            Ok(h) => vlog(&format!(
+                "[Vault invoke_tx] END fn={} ok hash={}",
+                function_name, h
+            )),
+            Err(e) => vlog(&format!(
+                "[Vault invoke_tx] END fn={} err={}",
+                function_name, e
+            )),
+        }
+        result
     }
 
     /// Simulate-only read: no tx submitted, returns the contract's return ScVal.
@@ -300,58 +407,208 @@ async fn submit_host_function(
     host_fn: HostFunction,
 ) -> Result<String, String> {
     let i18n = sc_i18n(lang);
+    let kind = host_fn_kind(&host_fn);
 
     let caller = pubkey_to_strkey(pub_bytes);
-    let seq = fetch_sequence(rpc, &caller, &*i18n).await?;
+    vlog(&format!(
+        "[Vault submit_host_function] BEGIN kind={} caller={}",
+        kind, caller
+    ));
+    let seq = match fetch_sequence(rpc, &caller, &*i18n).await {
+        Ok(s) => {
+            vlog(&format!(
+                "[Vault submit_host_function] kind={} seq fetched={}",
+                kind, s
+            ));
+            s
+        }
+        Err(e) => {
+            vlog(&format!(
+                "[Vault submit_host_function] kind={} fetch_sequence FAIL: {}",
+                kind, e
+            ));
+            return Err(e);
+        }
+    };
 
-    let unsigned_tx = build_host_fn_tx(pub_bytes, seq + 1, host_fn)?;
+    let unsigned_tx = build_host_fn_tx(pub_bytes, seq + 1, host_fn).map_err(|e| {
+        vlog(&format!(
+            "[Vault submit_host_function] kind={} build_host_fn_tx FAIL: {}",
+            kind, e
+        ));
+        e
+    })?;
     let unsigned_envelope = TransactionEnvelope::Tx(TransactionV1Envelope {
         tx: unsigned_tx.clone(),
         signatures: VecM::default(),
     });
     let unsigned_xdr = unsigned_envelope
         .to_xdr_base64(Limits::none())
-        .map_err(|e| format!("XDR error: {e}"))?;
+        .map_err(|e| {
+            vlog(&format!(
+                "[Vault submit_host_function] kind={} unsigned XDR err: {}",
+                kind, e
+            ));
+            format!("XDR error: {e}")
+        })?;
+    vlog(&format!(
+        "[Vault submit_host_function] kind={} unsigned_xdr_len={}",
+        kind,
+        unsigned_xdr.len()
+    ));
 
-    let sim = simulate_transaction(rpc, &unsigned_xdr, &*i18n).await?;
+    vlog(&format!(
+        "[Vault submit_host_function] kind={} calling simulate …",
+        kind
+    ));
+    let sim = simulate_transaction(rpc, &unsigned_xdr, &*i18n).await.map_err(|e| {
+        vlog(&format!(
+            "[Vault submit_host_function] kind={} simulate TRANSPORT FAIL: {}",
+            kind, e
+        ));
+        e
+    })?;
     if let Some(ref err) = sim.error {
+        vlog(&format!(
+            "[Vault submit_host_function] kind={} simulate REJECTED: {}",
+            kind, err
+        ));
         return Err(i18n.simulation_failed(err));
     }
+    vlog(&format!(
+        "[Vault submit_host_function] kind={} simulate OK (min_fee={:?}, has_tx_data={}, auth_in_sim_results={})",
+        kind,
+        sim.min_resource_fee,
+        sim.transaction_data.is_some(),
+        sim.results.as_ref().map(|r| r.len()).unwrap_or(0)
+    ));
 
     let soroban_data_xdr = sim
         .transaction_data
         .clone()
-        .ok_or_else(|| i18n.simulation_failed("missing transactionData"))?;
+        .ok_or_else(|| {
+            vlog(&format!(
+                "[Vault submit_host_function] kind={} simulate missing transactionData",
+                kind
+            ));
+            i18n.simulation_failed("missing transactionData")
+        })?;
     let soroban_data =
         SorobanTransactionData::from_xdr_base64(&soroban_data_xdr, Limits::none())
-            .map_err(|e| i18n.invalid_response(&e.to_string()))?;
+            .map_err(|e| {
+                vlog(&format!(
+                    "[Vault submit_host_function] kind={} soroban_data parse err: {}",
+                    kind, e
+                ));
+                i18n.invalid_response(&e.to_string())
+            })?;
     let resource_fee: i64 = match &sim.min_resource_fee {
         Some(serde_json::Value::String(s)) => s.parse().unwrap_or(0),
         Some(serde_json::Value::Number(n)) => n.as_i64().unwrap_or(0),
         _ => 0,
     };
-    let auth_entries = extract_auth_entries(&sim)?;
+    vlog(&format!(
+        "[Vault submit_host_function] kind={} resource_fee={}",
+        kind, resource_fee
+    ));
+    let auth_entries = extract_auth_entries(&sim).map_err(|e| {
+        vlog(&format!(
+            "[Vault submit_host_function] kind={} extract_auth_entries FAIL: {}",
+            kind, e
+        ));
+        e
+    })?;
+    vlog(&format!(
+        "[Vault submit_host_function] kind={} auth_entries_count={}",
+        kind,
+        auth_entries.len()
+    ));
 
     // Rebuild the operation carrying the original host function + auth.
     let mut final_tx = unsigned_tx;
-    final_tx = attach_auth_to_tx(final_tx, auth_entries)?;
-    final_tx = attach_simulation(final_tx, soroban_data, resource_fee, vec![])?;
+    final_tx = attach_auth_to_tx(final_tx, auth_entries).map_err(|e| {
+        vlog(&format!(
+            "[Vault submit_host_function] kind={} attach_auth_to_tx FAIL: {}",
+            kind, e
+        ));
+        e
+    })?;
+    final_tx = attach_simulation(final_tx, soroban_data, resource_fee, vec![]).map_err(|e| {
+        vlog(&format!(
+            "[Vault submit_host_function] kind={} attach_simulation FAIL: {}",
+            kind, e
+        ));
+        e
+    })?;
 
     let signed =
-        sign_transaction(&final_tx, signing_key, pub_bytes, rpc.passphrase)?;
+        sign_transaction(&final_tx, signing_key, pub_bytes, rpc.passphrase).map_err(|e| {
+            vlog(&format!(
+                "[Vault submit_host_function] kind={} sign_transaction FAIL: {}",
+                kind, e
+            ));
+            e
+        })?;
     let signed_xdr = signed
         .to_xdr_base64(Limits::none())
-        .map_err(|e| format!("XDR error: {e}"))?;
+        .map_err(|e| {
+            vlog(&format!(
+                "[Vault submit_host_function] kind={} signed XDR err: {}",
+                kind, e
+            ));
+            format!("XDR error: {e}")
+        })?;
+    vlog(&format!(
+        "[Vault submit_host_function] kind={} signed_xdr_len={} — sending to RPC …",
+        kind,
+        signed_xdr.len()
+    ));
 
-    let send_result = send_transaction(rpc, &signed_xdr, &*i18n).await?;
+    let send_result = send_transaction(rpc, &signed_xdr, &*i18n).await.map_err(|e| {
+        vlog(&format!(
+            "[Vault submit_host_function] kind={} send_transaction TRANSPORT FAIL: {}",
+            kind, e
+        ));
+        e
+    })?;
+    vlog(&format!(
+        "[Vault submit_host_function] kind={} send result: status={} hash={:?} err_xdr={:?}",
+        kind,
+        send_result.status,
+        send_result.hash,
+        send_result.error_result_xdr
+    ));
     match send_result.status.as_str() {
         "ERROR" => {
             let detail = send_result.error_result_xdr.unwrap_or_default();
+            vlog(&format!(
+                "[Vault submit_host_function] kind={} send ERROR: {}",
+                kind, detail
+            ));
             Err(i18n.tx_submission_failed(&detail))
         }
         _ => {
             let hash = send_result.hash.unwrap_or_default();
-            poll_transaction(rpc, &hash, &*i18n).await
+            vlog(&format!(
+                "[Vault submit_host_function] kind={} polling tx {} …",
+                kind, hash
+            ));
+            match poll_transaction(rpc, &hash, &*i18n).await {
+                Ok(msg) => {
+                    vlog(&format!(
+                        "[Vault submit_host_function] kind={} poll OK: {}",
+                        kind, msg
+                    ));
+                    Ok(msg)
+                }
+                Err(e) => {
+                    vlog(&format!(
+                        "[Vault submit_host_function] kind={} poll FAIL: {}",
+                        kind, e
+                    ));
+                    Err(e)
+                }
+            }
         }
     }
 }
