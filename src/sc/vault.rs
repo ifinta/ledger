@@ -18,7 +18,7 @@ use stellar_xdr::curr::{
     AccountId, BytesM, ContractExecutable, ContractId, ContractIdPreimage,
     ContractIdPreimageFromAddress, CreateContractArgsV2, Hash, HashIdPreimage,
     HashIdPreimageContractId, HostFunction, InvokeContractArgs,
-    InvokeHostFunctionOp, Int128Parts, Limits, Operation, OperationBody,
+    Int128Parts, LedgerKey, LedgerKeyContractCode, Limits,
     PublicKey, ReadXdr, ScAddress, ScSymbol, ScVal, SorobanAuthorizationEntry,
     SorobanTransactionData, StringM, Transaction, TransactionEnvelope,
     TransactionV1Envelope, Uint256, VecM, WriteXdr,
@@ -27,7 +27,7 @@ use stellar_xdr::curr::{
 use super::i18n::sc_i18n;
 use super::{
     attach_simulation, build_host_fn_tx, extract_auth_entries, fetch_sequence,
-    parse_contract_id, poll_transaction, send_transaction, sign_transaction,
+    parse_contract_id, poll_transaction, rpc_call, send_transaction, sign_transaction,
     simulate_transaction, soroban_rpc, SorobanRpcConfig,
 };
 use crate::vault::Vault;
@@ -117,32 +117,46 @@ impl Vault for StellarVault {
         let wasm_hash = self.wasm_hash();
         vlog(&format!("[Vault init] wasm_hash=sha256:{}", hex32(&wasm_hash)));
 
-        // 1. Upload WASM (idempotent on Soroban — re-uploads same hash are no-ops).
-        vlog("[Vault init] phase 1/3: UploadContractWasm — building HostFunction");
-        let upload_fn = HostFunction::UploadContractWasm(
-            BytesM::try_from(self.wasm_code.clone())
-                .map_err(|e| {
-                    vlog(&format!("[Vault init] phase 1 FAIL (WASM too large): {}", e));
-                    format!("WASM too large: {e}")
-                })?,
-        );
-        vlog("[Vault init] phase 1/3: submitting UploadContractWasm tx …");
-        match submit_host_function(
-            &self.rpc(),
-            self.language,
-            &signing_key,
-            &pub_bytes,
-            upload_fn,
-        )
-        .await
-        {
-            Ok(hash) => vlog(&format!(
-                "[Vault init] phase 1/3 OK — upload tx hash={}",
-                hash
-            )),
-            Err(e) => {
-                vlog(&format!("[Vault init] phase 1/3 FAIL: {}", e));
-                return Err(e);
+        // 1. Upload WASM — skipped if the same hash is already installed
+        //    on chain (idempotent re-uploads are also fine but cost a fee).
+        let already_installed = is_wasm_installed(&self.rpc(), self.language, &wasm_hash)
+            .await
+            .unwrap_or_else(|e| {
+                vlog(&format!(
+                    "[Vault init] phase 1/3: wasm-installed probe FAIL ({}); proceeding with upload",
+                    e
+                ));
+                false
+            });
+        if already_installed {
+            vlog("[Vault init] phase 1/3 SKIP — WASM already installed on chain");
+        } else {
+            vlog("[Vault init] phase 1/3: UploadContractWasm — building HostFunction");
+            let upload_fn = HostFunction::UploadContractWasm(
+                BytesM::try_from(self.wasm_code.clone())
+                    .map_err(|e| {
+                        vlog(&format!("[Vault init] phase 1 FAIL (WASM too large): {}", e));
+                        format!("WASM too large: {e}")
+                    })?,
+            );
+            vlog("[Vault init] phase 1/3: submitting UploadContractWasm tx …");
+            match submit_host_function(
+                &self.rpc(),
+                self.language,
+                &signing_key,
+                &pub_bytes,
+                upload_fn,
+            )
+            .await
+            {
+                Ok(hash) => vlog(&format!(
+                    "[Vault init] phase 1/3 OK — upload tx hash={}",
+                    hash
+                )),
+                Err(e) => {
+                    vlog(&format!("[Vault init] phase 1/3 FAIL: {}", e));
+                    return Err(e);
+                }
             }
         }
 
@@ -232,6 +246,45 @@ impl Vault for StellarVault {
         vault_id: &str,
     ) -> Result<String, String> {
         self.invoke_tx(secret_key, vault_id, "ping", vec![]).await
+    }
+
+    async fn lock(
+        &self,
+        secret_key: &str,
+        vault_id: &str,
+        amount: i128,
+    ) -> Result<String, String> {
+        if amount <= 0 {
+            return Err(format!("amount must be positive, got {amount}"));
+        }
+        // Decode caller (owner) public key for the `from` argument.
+        let (_signing_key, pub_bytes) = decode_secret(secret_key)?;
+        let from_scval = ScVal::Address(ScAddress::Account(AccountId(
+            PublicKey::PublicKeyTypeEd25519(Uint256(pub_bytes)),
+        )));
+        // Vault contract is the `to` argument.
+        let vault_bytes = parse_contract_id(vault_id)?;
+        let to_scval = ScVal::Address(ScAddress::Contract(ContractId(Hash(vault_bytes))));
+        // Amount as i128 split into hi/lo as XDR expects.
+        let hi = (amount >> 64) as i64;
+        let lo = (amount as u128 as u64) & u64::MAX;
+        let amount_scval = ScVal::I128(Int128Parts { hi, lo });
+
+        // Invoke the ZSOZSO SAC's `transfer(from, to, amount)`. The SAC's
+        // `from` arg is the caller, so `require_auth` is satisfied by the
+        // source-account signature on the outer tx.
+        let token_id = crate::vault::ZSOZSO_SAC_MAINNET;
+        vlog(&format!(
+            "[Vault lock] BEGIN amount={} vault={} sac={}",
+            amount, vault_id, token_id
+        ));
+        self.invoke_tx(
+            secret_key,
+            token_id,
+            "transfer",
+            vec![from_scval, to_scval, amount_scval],
+        )
+        .await
     }
 
     async fn withdraw(
@@ -526,14 +579,7 @@ async fn submit_host_function(
 
     // Rebuild the operation carrying the original host function + auth.
     let mut final_tx = unsigned_tx;
-    final_tx = attach_auth_to_tx(final_tx, auth_entries).map_err(|e| {
-        vlog(&format!(
-            "[Vault submit_host_function] kind={} attach_auth_to_tx FAIL: {}",
-            kind, e
-        ));
-        e
-    })?;
-    final_tx = attach_simulation(final_tx, soroban_data, resource_fee, vec![]).map_err(|e| {
+    final_tx = attach_simulation(final_tx, soroban_data, resource_fee, auth_entries).map_err(|e| {
         vlog(&format!(
             "[Vault submit_host_function] kind={} attach_simulation FAIL: {}",
             kind, e
@@ -613,28 +659,6 @@ async fn submit_host_function(
     }
 }
 
-/// Re-wrap the tx's operation with the given auth entries (keeping its host function).
-fn attach_auth_to_tx(
-    mut tx: Transaction,
-    auth_entries: Vec<SorobanAuthorizationEntry>,
-) -> Result<Transaction, String> {
-    if let Some(op) = tx.operations.first() {
-        if let OperationBody::InvokeHostFunction(ref invoke_op) = op.body {
-            let new_op = Operation {
-                source_account: op.source_account.clone(),
-                body: OperationBody::InvokeHostFunction(InvokeHostFunctionOp {
-                    host_function: invoke_op.host_function.clone(),
-                    auth: VecM::try_from(auth_entries)
-                        .map_err(|e| format!("Auth entries: {e}"))?,
-                }),
-            };
-            tx.operations = VecM::try_from(vec![new_op])
-                .map_err(|e| format!("Operation: {e}"))?;
-        }
-    }
-    Ok(tx)
-}
-
 // ── Crypto / encoding helpers ─────────────────────────────────────────────
 
 fn decode_secret(secret_key: &str) -> Result<(SigningKey, [u8; 32]), String> {
@@ -662,6 +686,35 @@ fn random_salt() -> [u8; 32] {
     let mut salt = [0u8; 32];
     rand::rng().fill_bytes(&mut salt);
     salt
+}
+
+/// Probe Soroban RPC for a `LedgerKey::ContractCode { hash }` entry.
+/// Returns `Ok(true)` if the WASM with this hash is already installed on chain.
+async fn is_wasm_installed(
+    rpc: &SorobanRpcConfig,
+    language: Language,
+    wasm_hash: &[u8; 32],
+) -> Result<bool, String> {
+    let key = LedgerKey::ContractCode(LedgerKeyContractCode {
+        hash: Hash(*wasm_hash),
+    });
+    let key_xdr = key
+        .to_xdr_base64(Limits::none())
+        .map_err(|e| format!("LedgerKey XDR error: {e}"))?;
+    let i18n = sc_i18n(language);
+    let result = rpc_call(
+        rpc,
+        "getLedgerEntries",
+        serde_json::json!({ "keys": [key_xdr] }),
+        &*i18n,
+    )
+    .await?;
+    let entries = result
+        .get("entries")
+        .and_then(|v| v.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+    Ok(entries > 0)
 }
 
 /// Derive the future contract ID locally: sha256 of the xdr-encoded

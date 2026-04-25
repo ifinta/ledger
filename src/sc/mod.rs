@@ -401,7 +401,7 @@ pub(crate) fn extract_auth_entries(
 
 use self::i18n::ScI18n;
 
-async fn rpc_call(
+pub(crate) async fn rpc_call(
     rpc: &SorobanRpcConfig,
     method: &str,
     params: serde_json::Value,

@@ -53,6 +53,18 @@ pub trait Vault {
         vault_id: &str,
     ) -> Result<String, String>;
 
+    /// Transfer `amount` of the vault's token from the caller's account
+    /// into the vault. Implemented by invoking the SAC's `transfer(from,
+    /// to, amount)` from the caller (`from == caller`, `to == vault_id`).
+    /// `amount` is in the token's smallest unit (e.g. stroops for Stellar
+    /// 7-decimal assets).
+    async fn lock(
+        &self,
+        secret_key: &str,
+        vault_id: &str,
+        amount: i128,
+    ) -> Result<String, String>;
+
     /// Transfer the entire vault balance to the owner. Fails before unlock.
     async fn withdraw(
         &self,
