@@ -294,6 +294,7 @@ impl Vault for StellarVault {
     ) -> Result<String, String> {
         self.invoke_tx(secret_key, vault_id, "withdraw", vec![])
             .await
+            .map_err(|e| map_vault_withdraw_error(self.language, &e))
     }
 
     async fn owner(
@@ -755,5 +756,40 @@ fn scval_to_i128(sv: &ScVal) -> Result<i128, String> {
             Ok(i128::from_be_bytes(bytes))
         }
         other => Err(format!("expected I128, got {other:?}")),
+    }
+}
+
+/// Translate a raw error string from the proof-of-zsozso vault `withdraw`
+/// invocation into a friendly i18n message when the underlying cause is one
+/// of the typed `Error` codes defined in the contract:
+///   #1 NotInitialised   #2 StillLocked   #3 NoBalance
+///
+/// Soroban surfaces typed contract errors in simulate / tx-failure diagnostic
+/// strings as `Error(Contract, #N)`. We pattern-match on that suffix and
+/// fall through to the original message for anything else.
+///
+/// Localised strings are inlined here (rather than added to the `ScI18n`
+/// trait in `zsozso-common`) to avoid a breaking change in the shared trait.
+fn map_vault_withdraw_error(lang: Language, raw: &str) -> String {
+    let still_locked = match lang {
+        Language::Hungarian => "A széf még zárolva van. Próbáld újra az unlock ledger után.",
+        Language::German => "Der Tresor ist noch gesperrt. Erneut nach dem Unlock-Ledger versuchen.",
+        Language::French => "Le coffre est encore verrouillé. Réessayez après le ledger de déverrouillage.",
+        Language::Spanish => "El cofre sigue bloqueado. Inténtalo de nuevo tras el ledger de desbloqueo.",
+        _ => "Vault is still locked. Try again after the unlock ledger.",
+    };
+    let no_balance = match lang {
+        Language::Hungarian => "A széf üres — nincs mit kivenni.",
+        Language::German => "Der Tresor ist leer — nichts zum Abheben.",
+        Language::French => "Le coffre est vide — rien à retirer.",
+        Language::Spanish => "El cofre está vacío — nada para retirar.",
+        _ => "Vault is empty — nothing to withdraw.",
+    };
+    if raw.contains("Error(Contract, #2)") {
+        still_locked.to_string()
+    } else if raw.contains("Error(Contract, #3)") {
+        no_balance.to_string()
+    } else {
+        raw.to_string()
     }
 }
